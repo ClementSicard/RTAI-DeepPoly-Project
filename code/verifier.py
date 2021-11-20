@@ -11,12 +11,14 @@ def analyze(net, inputs, eps, true_label):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Neural network verification using DeepPoly relaxation')
+    parser = argparse.ArgumentParser(
+        description='Neural network verification using DeepPoly relaxation')
     parser.add_argument('--net',
                         type=str,
                         required=True,
                         help='Neural network architecture which is supposed to be verified.')
-    parser.add_argument('--spec', type=str, required=True, help='Test case to verify.')
+    parser.add_argument('--spec', type=str, required=True,
+                        help='Test case to verify.')
     args = parser.parse_args()
 
     with open(args.spec, 'r') as f:
@@ -34,13 +36,16 @@ def main():
     elif args.net.endswith('fc4'):
         net = FullyConnected(DEVICE, INPUT_SIZE, [100, 100, 50, 10]).to(DEVICE)
     elif args.net.endswith('fc5'):
-        net = FullyConnected(DEVICE, INPUT_SIZE, [100, 100, 100, 100, 10]).to(DEVICE)
+        net = FullyConnected(DEVICE, INPUT_SIZE, [
+                             100, 100, 100, 100, 10]).to(DEVICE)
     else:
         assert False
 
-    net.load_state_dict(torch.load('../mnist_nets/%s.pt' % args.net, map_location=torch.device(DEVICE)))
+    net.load_state_dict(torch.load('../mnist_nets/%s.pt' %
+                        args.net, map_location=torch.device(DEVICE)))
 
-    inputs = torch.FloatTensor(pixel_values).view(1, 1, INPUT_SIZE, INPUT_SIZE).to(DEVICE)
+    inputs = torch.FloatTensor(pixel_values).view(
+        1, 1, INPUT_SIZE, INPUT_SIZE).to(DEVICE)
     outs = net(inputs)
     pred_label = outs.max(dim=1)[1].item()
     assert pred_label == true_label
