@@ -19,6 +19,12 @@ class SPU(nn.Module):
         return torch.where(x > 0, x**2 - 0.5, torch.sigmoid(-x) - 1)
 
 
+class DerivativeSPU(nn.Module):
+
+    def forward(self, x):
+        return torch.where(x > 0, 2 * x, torch.sigmoid(-x) * (1 - torch.sigmoid(-x)))
+
+
 class FullyConnected(nn.Module):
 
     def __init__(self, device, input_size, fc_layers):
