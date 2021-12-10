@@ -1,13 +1,31 @@
 import argparse
 import torch
 from networks import FullyConnected
+from deeppoly import DeepPolyVerifier
+from box import BoxVerifier
+import numpy as np
 
 DEVICE = 'cpu'
 INPUT_SIZE = 28
 
 
 def analyze(net, inputs, eps, true_label):
-    return 0
+    verifier = BoxVerifier(
+        net=net,
+        inputs=inputs,
+        eps=eps,
+        true_label=true_label
+    )
+    if verifier.verify():
+        return True
+    else:
+        verifier = DeepPolyVerifier(
+            net=net,
+            inputs=inputs,
+            eps=eps,
+            true_label=true_label
+        )
+        return verifier.verify()
 
 
 def main():

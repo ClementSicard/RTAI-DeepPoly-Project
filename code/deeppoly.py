@@ -1,378 +1,408 @@
-from math import ceil
+import numpy as np
 import torch
-from torch import overrides
-from networks import SPU, Normalization, DerivativeSPU
-from typing import List, Tuple
+from box import Box
+from typing import Tuple, List
+import torch
+from networks import Normalization, SPU, FullyConnected
+from utils import SPU as spu, derivate_SPU
+from itertools import product
 
 
-class DeepPolyCertifier:
-    net: torch.nn.Module
-    eps: torch.float
-    inputs: torch.Tensor
+class DeepPolyTransformer():
+    lower_weights: np.ndarray
+    lower_bias: np.ndarray
+    upper_weights: np.ndarray
+    upper_bias: np.ndarray
+    layer: torch.nn.Module
+    box: Box
+    input_shape: Tuple[int]
+    layer_shape: Tuple[int]
+
+    def __repr__(self) -> str:
+        return f"DeepPolyTransformer(layer: {self.layer})"
+
+    def __init__(
+        self,
+        lower_weights: np.ndarray,
+        lower_bias: np.ndarray,
+        upper_weights: np.ndarray,
+        upper_bias: np.ndarray,
+        box: Box,
+        layer: torch.nn.Module = None
+    ) -> None:
+        self.lower_weights = lower_weights
+        self.lower_bias = lower_bias
+
+        self.layer = layer
+
+        self.upper_weights = upper_weights
+        self.upper_bias = upper_bias
+
+        self.box = box
+
+        nb_of_input_dimensions = box.lower.ndim
+        self.input_shape = self.lower_weights.shape[nb_of_input_dimensions:]
+        self.layer_shape = box.upper.shape
+
+    def transform(self, layer: torch.nn.Module):
+        if isinstance(layer, torch.nn.Flatten):
+            lower_weights = self.lower_weights
+            lower_bias = self.lower_bias
+
+            upper_weights = self.upper_weights
+            upper_bias = self.upper_bias
+
+        elif isinstance(layer, Normalization):
+            mean = layer.mean.detach().numpy()
+            std = layer.sigma.detach().numpy()
+
+            lower_weights = np.zeros(2 * self.layer_shape)
+            indices = tuple(list(map(lambda x: list(x), zip(
+                *product(*map(range, self.layer_shape))))) * 2)
+
+            lower_weights[indices] = 1 / std
+
+            lower_bias = np.ones(self.layer_shape) * (-mean / std)
+
+            upper_weights = lower_weights.copy()
+            upper_bias = lower_bias.copy()
+
+        elif isinstance(layer, torch.nn.Linear):
+            weights = layer.weight.detach().numpy()
+            bias = layer.bias.detach().numpy()
+
+            lower_weights, upper_weights = weights.copy(), weights.copy()
+            lower_bias, upper_bias = bias.copy(), bias.copy()
+
+        elif isinstance(layer, SPU):
+            """
+            Generate indices for the 5 cases
+            """
+
+            zero_SPU = np.sqrt(np.abs(spu(0)))
+
+            # 1st case: upper <= 0, lower <= 0
+            idx_1 = self.box.upper <= 0
+
+            # 2nd case: lower >= 0
+            idx_2 = self.box.lower >= 0
+
+            # 3rd case: upper >= zero_SPU
+            idx_3 = self.box.upper >= zero_SPU
+
+            # all the remaining indices
+            tmp_idx_4 = np.logical_and(
+                np.logical_and(
+                    np.logical_not(idx_1),
+                    np.logical_not(idx_2)
+                ),
+                np.logical_not(idx_3),
+            )
+
+            # 4th case: the other cases that verify with SPU(l) > SPU(u)
+            idx_4 = np.logical_and(
+                tmp_idx_4,
+                spu(self.box.lower) > spu(
+                    self.box.upper)
+            )
+
+            # 5th case: all the other cases
+            idx_5 = np.logical_and(tmp_idx_4, np.logical_not(idx_4))
+
+            # Initiate weights and bias
+            lower_weights = np.zeros(self.layer_shape * 2)
+            lower_bias = np.zeros(self.layer_shape)
+
+            upper_weights = np.zeros(self.layer_shape * 2)
+            upper_bias = np.zeros(self.layer_shape)
+
+            diag_slope = np.diag((spu(self.box.upper) - spu(
+                self.box.lower)) / (self.box.upper - self.box.lower))
+
+            """
+            1st case: u <= 0
+            """
+            # w_l = (spu(u) - spu(l)) / (u - l)
+            lower_weights[idx_1] = diag_slope[idx_1]
+
+            # b_l = SPU(l) - w_l * l
+            lower_bias[idx_1] = (spu(
+                self.box.lower) - lower_weights @ self.box.lower)[idx_1]
+
+            # w_u = 0 (already the case as initiated)
+
+            # b_u = SPU(l)
+            upper_bias[idx_1] = spu(self.box.lower)[idx_1]
+
+            """
+            2nd case: l >= 0
+            """
+            # Optimal point(s)
+            # a = (u + l) / 2
+            optimal_points_2 = (
+                self.box.lower + self.box.upper) / 2.0
+
+            # w_l = self.derivative_SPU(a)
+            lower_weights[idx_2] = np.diag(
+                derivate_SPU(optimal_points_2))[idx_2]
+
+            # b_l = spu(a) - a * self.derivative_SPU(a)
+            lower_bias[idx_2] = (spu(
+                optimal_points_2) - optimal_points_2 * derivate_SPU(optimal_points_2))[idx_2]
+
+            # w_u = u + l
+            upper_weights[idx_2] = np.diag(
+                self.box.upper + self.box.lower)[idx_2]
+
+            # b_u = -u * l - spu(0)
+            upper_bias[idx_2] = (-self.box.upper *
+                                 self.box.lower - spu(0))[idx_2]
+
+            """
+            3rd case: u >= SPU^(-1)(0)
+            """
+
+            # Optimal point
+            # a = max((u + l) / 2, SPU_equals_to_zero)
+            optimal_points_3 = np.maximum(
+                (self.box.upper + self.box.lower) / 2.0, zero_SPU)
+
+            # w_l = self.derivative_SPU(a)
+            lower_weights[idx_3] = np.diag(
+                derivate_SPU(optimal_points_3))[idx_3]
+
+            # b_l = spu(a) - a * self.derivative_SPU(a)
+            lower_bias[idx_3] = (spu(
+                optimal_points_3) - optimal_points_3 @ derivate_SPU(optimal_points_3))[idx_3]
+
+            # w_u = (spu(u) - spu(l)) / (u - l)
+            upper_weights[idx_3] = diag_slope[idx_3]
+
+            # b_u = spu(l) - w_u * l
+            upper_bias[idx_3] = (spu(
+                self.box.lower) - upper_weights @ self.box.lower)[idx_3]
+
+            """
+            4th case: all the other indices that verify SPU(l) > SPU(u)
+            """
+            # w_l = 0.0 (already the case)
+
+            # b_l = spu(0)
+            lower_bias[idx_4] = spu(0)
+
+            # w_u = 0 (already the case)
+
+            # b_u = max(spu(l), spu(u))
+            upper_bias[idx_4] = np.maximum(
+                spu(self.box.lower), spu(self.box.upper))[idx_4]
+
+            """
+            5th case: all the other indices
+            """
+            # w_l = 0.0 (already the case)
+
+            # b_l = spu(0)
+            lower_bias[idx_5] = spu(0)
+
+            # w_u = (spu(u) - spu(l)) / (u - l)
+            upper_weights[idx_5] = diag_slope[idx_5]
+
+            # b_u = spu(l) - w_u * l
+            upper_bias[idx_5] = (spu(
+                self.box.lower) - upper_weights @ self.box.lower)[idx_5]
+
+        box = self.box.transform(layer=layer)
+
+        return DeepPolyTransformer(
+            lower_weights=lower_weights,
+            lower_bias=lower_bias,
+            upper_weights=upper_weights,
+            upper_bias=upper_bias,
+            box=box,
+            layer=layer
+        )
+
+
+class DeepPolyVerifier():
+    transformers: List[DeepPolyTransformer]
     true_label: int
-    transformers: List[torch.nn.Module]
-    verifier: torch.nn.Module
+    eps: float
+    layers: List[torch.nn.Module]
+    verbose: bool
 
     def __init__(
         self,
         net: torch.nn.Module,
-        eps: float,
         inputs: torch.Tensor,
-        true_label: int
+        eps: float,
+        true_label: int,
+        verbose: bool
     ) -> None:
-        self.net = net
+
         self.eps = eps
-        self.inputs = inputs
         self.true_label = true_label
-        self._generate_transformers()
-        self.verifier = torch.nn.Sequential(*self.transformers)
+        self.verbose = verbose
 
-    def _generate_transformers(self) -> None:
-        self.transformers = [DeepPolyInputsTransformer(eps=self.eps)]
+        self.layers = [mod for mod in net.modules() if not isinstance(
+            mod, (torch.nn.Sequential, FullyConnected))]
 
-        current_transformer = None
+        self.transformers = []
 
-        for layer in self.net.layers:
-            if isinstance(layer, Normalization):
-                current_transformer = DeepPolyNormalizationTransformer()
+        inputs_np = inputs.detach().numpy()
 
-            elif isinstance(layer, torch.nn.Flatten):
-                current_transformer = DeepPolyFlattenTransformer(
-                    previous=current_transformer
-                )
+        lower = inputs_np - eps
+        upper = inputs_np + eps
 
-            elif isinstance(layer, SPU):
-                current_transformer = DeepPolySPUTransformer(
-                    previous=current_transformer
-                )
+        transformer_shape = (*inputs.shape, 0)
 
-            elif isinstance(layer, torch.nn.Linear):
-                bias = layer.bias.detach()
-                weights = layer.weight.detach()
+        self.transformers = [
+            DeepPolyTransformer(
+                lower_weights=np.zeros(transformer_shape),
+                lower_bias=lower,
+                upper_weights=np.zeros(transformer_shape),
+                upper_bias=upper,
+                box=Box(lower=lower, upper=upper,
+                        verbose=self.verbose, from_deeppoly=True),
+                layer=None
+            )
+        ]
+        for layer in self.layers:
+            self.transformers.append(self.transformers[-1].transform(layer))
 
-                current_transformer = DeepPolyAffineTransformer(
-                    bias=bias,
-                    weights=weights,
-                    previous=current_transformer
-                )
-            else:
-                raise Exception(f"Unknow type of layer: {type(layer)}")
+    def verify(self) -> bool:
+        current_transformer = self.transformers[-1]
 
-        self.transformers.append(current_transformer)
+        for i in reversed(range(1, len(self.layers))):
+            layer = self.layers[i]
+            print(f"Layer {i + 1}/{len(self.layers)}: {layer}")
 
-    def verify(self):
-        return self.verifier(self.inputs)
+            if isinstance(layer, torch.nn.Flatten):
+                break
 
+            current_transformer = self.back_substitution(
+                transformer=current_transformer,
+                previous_transformer=self.transformers[i]
+            )
 
-class DeepPolyInputsTransformer(torch.nn.Module):
-    eps: torch.float
-    bounds: torch.Tensor
+            # lower_weights = current_transformer.lower_weights
+            # lower_bias = current_transformer.lower_bias
+            # upper_weights = current_transformer.upper_weights
+            # upper_bias = current_transformer.upper_bias
 
-    def __init__(self, eps: torch.float) -> None:
-        super(DeepPolyInputsTransformer, self).__init__()
-        self.eps = eps
+            if self.provable(current_transformer):
+                return True
 
-    def forward(self, inputs: torch.Tensor):
-        self.bounds = inputs.repeat(2, 1, 1, 1)
+        return self.provable(current_transformer)
 
-        # Add epsilon around the input bounds
-        self.bounds += torch.Tensor([[[[-self.eps]]], [[[self.eps]]]])
+    def back_substitution(
+        self,
+        transformer: DeepPolyTransformer,
+        previous_transformer: DeepPolyTransformer
+    ) -> DeepPolyTransformer:
 
-        # Clamp them back to intersect with [0, 1]^n
-        self.bounds = torch.clamp(self.bounds, 0, 1)
+        print(f"Transformer: {transformer}")
+        print(f"\tWeights shape: {transformer.lower_weights.shape}")
+        print(f"\tBounds shape: {transformer.box.lower.shape}")
+        print(f"Previous transformer: {previous_transformer}")
+        print(f"\tWeights shape: {previous_transformer.lower_weights.shape}")
+        print(f"\tBounds shape: {previous_transformer.box.lower.shape}")
 
-        return self.bounds
-
-
-class DeepPolyNormalizationTransformer(torch.nn.Module):
-    previous: torch.nn.Module
-    std: torch.Tensor
-    mean: torch.Tensor
-    bounds: torch.Tensor
-
-    def __init__(self, previous: torch.nn.Module) -> None:
-        super(DeepPolyNormalizationTransformer, self).__init__()
-        self.previous = previous
-
-        self.std = torch.Tensor([0.3081])
-        self.mean = torch.Tensor([0.1307])
-
-    def forward(self, bounds: torch.Tensor):
-        self.bounds = torch.div(bounds - self.mean, self.std)
-        return self.bounds
-
-
-class DeepPolyFlattenTransformer(torch.nn.Module):
-    previous: torch.nn.Module
-    bounds: torch.Tensor
-
-    def __init__(self, previous: torch.nn.Module) -> None:
-        super(DeepPolyFlattenTransformer, self).__init__()
-        self.previous = previous
-
-    def forward(self, bounds: torch.Tensor):
-        return torch.stack(
-            tensors=[
-                bounds[0, :, :, :].flatten(),
-                bounds[1, :, :, :].flatten()
-            ],
-            dim=1
+        lower_bias = np.zeros(previous_transformer.input_shape)
+        lower_weights = np.zeros(
+            (
+                *transformer.input_shape,
+                *previous_transformer.input_shape,
+            )
         )
 
-    def _back_substitution_helper(self, max_steps: int, parameters: Tuple[torch.Tensor, ...] = None):
-        self.bounds = self.last._back_substitution(
-            max_steps=max_steps, parameters=parameters)
-        slicing_idx = int(len(self.bounds) / 2.0)
-
-        self.bounds = torch.stack(
-            tensors=[
-                self.bounds[: slicing_idx],
-                self.bounds[slicing_idx:]
-            ],
-            dim=1
+        upper_bias = np.zeros(previous_transformer.input_shape)
+        upper_weights = np.zeros(
+            (
+                *transformer.input_shape,
+                *previous_transformer.input_shape,
+            )
         )
 
-        return self.bounds
+        for neur in range(transformer.layer_shape[0]):
+            if self.verbose:
+                print(f"\ti = {neur}")
 
+            # Lower transformer bound
+            prev_l_tmp_bias = (previous_transformer.lower_bias * (transformer.lower_weights[neur] >= 0)) +\
+                (previous_transformer.upper_bias *
+                 (transformer.lower_weights[neur] < 0))
 
-class DeepPolyAffineTransformer(torch.nn.Module):
-    previous: torch.nn.Module
-    bias: torch.Tensor
-    weights: torch.Tensor
-    w_max: torch.Tensor
-    w_min: torch.Tensor
-    bounds: torch.Tensor
-    bs_steps: int
+            previous_l_tmp_weights = (previous_transformer.lower_weights.T * (transformer.lower_weights[neur] >= 0)) + (
+                previous_transformer.upper_weights.T * (transformer.lower_weights[neur] < 0))
 
-    def __init__(self, bias: torch.Tensor = None, weights: torch.Tensor = None, previous: torch.nn.Module = None, bs_steps: int = 0) -> None:
-        super(DeepPolyAffineTransformer, self).__init__()
+            lower_bias[neur] = transformer.lower_bias[neur] + \
+                transformer.lower_weights[neur] @ prev_l_tmp_bias.T
 
-        self.previous = previous
+            lower_weights[neur] = previous_l_tmp_weights @ transformer.lower_weights[neur]
 
-        self.bias = bias
-        self.weights = weights
+            # Upper transformer bound
+            previous_u_tmp_bias = (previous_transformer.upper_bias * (transformer.upper_weights[neur] >= 0)) +\
+                (previous_transformer.lower_bias *
+                 (transformer.upper_weights[neur] < 0))
+            previous_u_tmp_weights = (previous_transformer.upper_weights.T * (transformer.upper_weights[neur] >= 0)) +\
+                (previous_transformer.lower_weights.T *
+                 (transformer.upper_weights[neur] < 0))
 
-        self.w_max = torch.clamp(self.weights, min=0.0)
-        self.w_min = torch.clamp(self.weights, max=0.0)
+            upper_bias[neur] = transformer.upper_bias[neur] + \
+                transformer.upper_weights[neur] @ previous_u_tmp_bias.T
 
-        # Backsubsitution steps
-        self.bs_steps = bs_steps
+            upper_weights[neur] = previous_u_tmp_weights @ transformer.upper_weights[neur]
 
-    def _back_sub_helper(self, max_steps: int, parameters: Tuple[torch.Tensor, ...] = None):
-        if parameters:
-            assert(len(parameters) == 4)
-            w_l, w_u, b_l, b_u = parameters
-        else:
-            w_l = self.weights
-            w_u = self.weights
-            b_l = self.bias
-            b_u = self.bias
+        print("====" * 20)
 
-        clamped_w_l_min, clamped_w_l_max = torch.clamp(
-            w_l, min=0), torch.clamp(w_l, max=0)
-        clamped_w_u_min, clamped_w_u_max = torch.clamp(
-            w_u, min=0), torch.clamp(w_u, max=0)
-
-        if max_steps == 0 or not self.previous.previous.previous:
-            l_b = torch.matmul(clamped_w_l_min, self.last.bound[:, 0]) + torch.matmul(
-                clamped_w_l_max, self.last.bound[:, 1])
-
-            u_b = torch.matmul(clamped_w_u_min, self.last.bound[:, 1]) + torch.matmul(
-                clamped_w_u_max, self.last.bound[:, 0])
-
-            return torch.stack([l_b, u_b], dim=1)
-
-        else:
-            # TODO: Deal with case after SPU transformer
-            updated_w_l = w_l
-            updated_w_u = w_u
-            updated_b_l = b_l
-            updated_b_u = b_u
-
-            return self.previous._back_substitution_helper(parameters=(updated_w_l, updated_w_u, updated_b_l, updated_b_u), max_steps=max_steps - 1)
-
-    def back_substitution(self, max_steps: int):
-        updated_bounds = self._back_sub_helper(max_steps=max_steps)
-
-        lower_bound_indices = self.bounds[:, 0] < updated_bounds[:, 0]
-        upper_bound_indices = self.bounds[:, 1] > updated_bounds[:, 1]
-
-        # Update bounds with computed indices
-        self.bounds[lower_bound_indices,
-                    0] = updated_bounds[lower_bound_indices, 0]
-        self.bounds[upper_bound_indices,
-                    1] = updated_bounds[upper_bound_indices, 1]
-
-    def forward(self, bounds: torch.Tensor) -> torch.Tensor:
-        l_b = torch.matmul(
-            self.w_max, bounds[:, 0]) + torch.matmul(self.w_min, bounds[:, 1])
-        u_b = torch.matmul(
-            self.w_max, bounds[:, 1]) + torch.matmul(self.w_min, bounds[:, 0])
-
-        self.bounds = torch.stack([l_b, u_b], dim=1) + self.bias.reshape(-1,
-                                                                         1) if self.bias else torch.stack([l_b, u_b], dim=1)
-
-        if self.bs_steps > 0:
-            self.back_substitution(self.bs_steps)
-
-        return self.bounds
-
-
-class DeepPolySPUTransformer(torch.nn.Module):
-    previous: torch.nn.Module
-    derivative_SPU: torch.nn.Module
-    compute_SPU: torch.nn.Module
-    bounds: torch.Tensor
-    zero_SPU: torch.Tensor
-
-    def __init__(self, previous: torch.nn.Module = None) -> None:
-        super(DeepPolySPUTransformer, self).__init__()
-        self.previous = previous
-
-        self.derivative_spu = DerivativeSPU()
-        self.compute_SPU = SPU()
-        self.zero_SPU = torch.sqrt(torch.abs(SPU(torch.tensor(0))))
-
-    def forward(self, bounds: torch.Tensor):
-        return self._compute_linear_bounds(bounds)
-
-    def _back_substitution_helper(self):
-        pass
-
-    def _compute_linear_bounds(self, bounds: torch.Tensor):
-        self.bounds = bounds
-
-        """
-        Generate indices for the 5 cases
-        """
-
-        # 1st case: upper <= 0, lower <= 0
-        idx_1 = self.bounds[:, 1] <= 0
-
-        # 2nd case: lower >= 0
-        idx_2 = self.bounds[:, 0] >= 0
-
-        # 3rd case: upper >= zero_SPU
-        idx_3 = self.bounds[:, 1] >= self.zero_SPU
-
-        # all the remaining indices
-        tmp_idx_4 = torch.logical_and(
-            torch.logical_and(
-                torch.logical_not(idx_1),
-                torch.logical_not(idx_2)
+        lower = np.sum(
+            np.minimum(
+                lower_weights.T * previous_transformer.box.lower +
+                lower_bias.reshape((-1, 1)),
+                lower_weights.T * previous_transformer.box.upper +
+                lower_bias.reshape((-1, 1)),
             ),
-            torch.logical_not(idx_3),
+            axis=1
         )
 
-        # 4th case: the other cases that verify with SPU(l) > SPU(u)
-        idx_4 = torch.logical_and(
-            tmp_idx_4,
-            self.compute_SPU(self.bounds[:, 0]) > self.compute_SPU(
-                self.bounds[:, 1])
+        upper = np.sum(
+            np.maximum(
+                upper_weights.T * previous_transformer.box.upper +
+                upper_bias.reshape((-1, 1)),
+                upper_weights.T * previous_transformer.box.lower +
+                upper_bias.reshape((-1, 1))
+            ),
+            axis=1
         )
 
-        # 5th case: all the other cases
-        idx_5 = torch.logical_and(tmp_idx_4, torch.logical_not(idx_4))
+        if self.verbose:
+            print(
+                f"Lower_weights.T shape: {(lower_weights.T).shape}")
+            print(
+                f"Product shape: {(lower_weights.T * previous_transformer.box.upper).shape}")
+            print(
+                f"Bias shape: {lower_bias.shape}")
+            print(f"Lower shape: {lower.shape}")
+            print(f"Upper shape: {upper.shape}")
 
-        # Initiate the weights and bias for all the inputs
-        self.bound_weights = torch.zeros(self.bounds.shape[0], 2)
-        self.bound_bias = torch.zeros(self.bounds.shape[0], 2)
+        box = Box(lower=lower, upper=upper,
+                  verbose=self.verbose, from_deeppoly=True)
 
-        """
-        1st case: u <= 0
-        """
-        # w_l = (self.compute_SPU(u) - self.compute_SPU(l)) / (u - l)
-        self.bound_weights[idx_1, 0] = (self.compute_SPU(self.bounds[idx_1, 1]) - self.compute_SPU(
-            self.bounds[idx_1, 0])) / (self.bounds[idx_1, 1] - self.bounds[idx_1, 0])
+        return DeepPolyTransformer(
+            lower_weights=lower_weights,
+            lower_bias=lower_bias,
+            upper_weights=upper_weights,
+            upper_bias=upper_bias,
+            box=box
+        )
 
-        # b_l = SPU(l) - w_l * l
-        self.bound_bias[idx_1, 0] = self.compute_SPU(
-            self.bounds[idx_1, 0]) - self.bound_weights[idx_1, 0] * self.bounds[idx_1, 0]
+    def provable(
+        self,
+        transformer: DeepPolyTransformer
+    ) -> bool:
 
-        # w_u = 0 (already the case as initiated)
+        target_lower = transformer.box.lower[self.true_label]
+        other_scores = transformer.box.upper[np.arange(
+            len(transformer.box.lower)) != self.true_label]
 
-        # b_u = SPU(l)
-        self.bound_bias[idx_1, 1] = self.compute_SPU(self.bounds[idx_1, 0])
-
-        """
-        2nd case: l >= 0
-        """
-        # Optimal point(s)
-        # a = (u + l) / 2
-        optimal_points_2 = (self.bounds[idx_2, 1] + self.bounds[idx_2, 0]) / 2
-
-        # w_l = self.derivative_SPU(a)
-        self.bound_weights[idx_2, 0] = self.derivative_SPU(optimal_points_2)
-
-        # b_l = self.compute_SPU(a) - a * self.derivative_SPU(a)
-        self.bound_bias[idx_2, 0] = self.compute_SPU(
-            optimal_points_2) - optimal_points_2 * self.derivative_SPU(optimal_points_2)
-
-        # w_u = u + l
-        self.bound_weights[idx_2, 1] = self.bounds[idx_2,
-                                                   1] + self.bounds[idx_2, 0]
-        # b_u = -u * l - self.compute_SPU(0)
-        self.bound_bias[idx_2, 1] = -self.bounds[idx_2, 1] * \
-            self.bounds[idx_2, 0] - self.compute_SPU(0)
-
-        """
-        3rd case: u >= SPU^(-1)(0)
-        """
-        # w_u = (self.compute_SPU(u) - self.compute_SPU(l)) / (u - l)
-        self.bound_weights[idx_3, 1] = (self.compute_SPU(self.bounds[idx_3, 1]) - self.compute_SPU(
-            self.bounds[idx_3, 0])) / (self.bounds[idx_3, 1] - self.bounds[idx_3, 0])
-
-        # b_u = self.compute_SPU(l) - w_u * l
-        self.bound_bias[idx_3, 1] = self.compute_SPU(
-            self.bounds[idx_3, 0]) - self.bound_weights[idx_3, 1] * self.bounds[idx_3, 0]
-
-        # Optimal point
-        # a = max((u + l) / 2, SPU_equals_to_zero)
-        optimal_points_3 = torch.max(
-            (self.bounds[idx_3, 1] + self.bounds[idx_3, 0]) / 2, self.zero_SPU)
-
-        # w_l = self.derivative_SPU(a)
-        self.bound_weights[idx_3, 0] = self.derivative_SPU(optimal_points_3)
-        # b_l = self.compute_SPU(a) - a * self.derivative_SPU(a)
-        self.bound_bias[idx_3, 0] = self.compute_SPU(
-            optimal_points_3) - optimal_points_3 * self.derivative_SPU(optimal_points_3)
-
-        """
-        4th case: all the other indices that verify SPU(l) > SPU(u)
-        """
-
-        # w_u = 0 (already the case)
-
-        # b_u = max(self.compute_SPU(l), self.compute_SPU(u))
-        self.bound_bias[idx_4, 1] = torch.max(
-            self.compute_SPU(self.bounds[idx_4, 0]), self.compute_SPU(self.bounds[idx_4, 1]))
-
-        # w_l = 0.0 (already the case)
-
-        # b_l = self.compute_SPU(0)
-        self.bound_bias[idx_4, 0] = self.compute_SPU(0)
-
-        """
-        5th case: all the other indices
-        """
-
-        # w_u = (self.compute_SPU(u) - self.compute_SPU(l)) / (u - l)
-        self.bound_weights[idx_5, 1] = (self.compute_SPU(self.bounds[idx_5, 1]) - self.compute_SPU(
-            self.bounds[idx_5, 0])) / (self.bounds[idx_5, 1] - self.bounds[idx_5, 0])
-        # b_u = self.compute_SPU(l) - w_u * l
-        self.bound_bias[idx_5, 1] = self.compute_SPU(
-            self.bounds[idx_5, 0]) - self.bound_weights[idx_5, 1] * self.bounds[idx_5, 0]
-
-        # w_l = 0.0 (already the case)
-
-        # b_l = self.compute_SPU(0)
-        self.bound_bias[idx_5, 0] = self.compute_SPU(0)
-
-        """
-        Done generating weights and bias for all the indices.
-
-        Compute bound transformation
-        """
-        self.bounds = self.bound_weights * self.bounds + self.bound_bias
-
-        return self.bounds
+        return target_lower > other_scores.max()
