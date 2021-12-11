@@ -7,7 +7,7 @@ from utils import SPU as spu
 from typing import List
 
 
-class Box():
+class LinearlyBoundedDomain():
     lower: np.ndarray
     upper: np.ndarray
     verbose: bool
@@ -26,14 +26,16 @@ class Box():
         self.from_deeppoly = from_deeppoly
 
     def __repr__(self) -> str:
-        return f"Box(lower: {self.lower}, upper: {self.upper}"
+        return f"LinearlyBoundedDomain(lower: {self.lower}, upper: {self.upper}"
 
     def transform(self, layer: nn.Module):
         if self.verbose:
             if self.from_deeppoly:
-                print(f"\t[Box]: Current layer is of type {layer}")
+                print(
+                    f"\t[LinearlyBoundedDomain]: Current layer is of type {layer}")
             else:
-                print(f"[Box]: Current layer is of type {layer}")
+                print(
+                    f"[LinearlyBoundedDomain]: Current layer is of type {layer}")
 
         if isinstance(layer, torch.nn.Flatten):
             lower = self.lower.flatten()
@@ -78,11 +80,11 @@ class Box():
             else:
                 print(f"\t{self.lower.shape} -> {lower.shape}")
 
-        return Box(lower=lower, upper=upper, verbose=self.verbose, from_deeppoly=self.from_deeppoly)
+        return LinearlyBoundedDomain(lower=lower, upper=upper, verbose=self.verbose, from_deeppoly=self.from_deeppoly)
 
 
-class BoxVerifier():
-    boxes: List[Box]
+class LinearlyBoundedDomainVerifier():
+    domains: List[LinearlyBoundedDomain]
     true_label: int
     eps: float
     verbose: bool
@@ -110,8 +112,8 @@ class BoxVerifier():
         lower = np.maximum(0, inputs_np - eps)
         upper = np.minimum(1, inputs_np + eps)
 
-        self.boxes = [
-            Box(
+        self.domains = [
+            LinearlyBoundedDomain(
                 lower=lower,
                 upper=upper,
                 verbose=self.verbose,
@@ -120,12 +122,12 @@ class BoxVerifier():
         ]
 
         for layer in layers:
-            self.boxes.append(self.boxes[-1].transform(layer))
+            self.domains.append(self.domains[-1].transform(layer))
 
     def verify(self) -> bool:
-        output = self.boxes[-1]
+        output = self.domains[-1]
         target_lower = output.lower[self.true_label]
         other_scores = output.upper[self.true_label !=
-                                    np.arange(len(self.boxes[-1].lower))]
+                                    np.arange(len(self.domains[-1].lower))]
 
         return target_lower > other_scores.max()

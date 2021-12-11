@@ -2,7 +2,7 @@ import argparse
 import torch
 from networks import FullyConnected
 from deeppoly import DeepPolyVerifier
-from box import BoxVerifier
+from domain import LinearlyBoundedDomainVerifier
 import numpy as np
 
 DEVICE = 'cpu'
@@ -10,7 +10,7 @@ INPUT_SIZE = 28
 
 
 def analyze(net, inputs, eps, true_label):
-    verifier = BoxVerifier(
+    verifier = LinearlyBoundedDomainVerifier(
         net=net,
         inputs=inputs,
         eps=eps,
