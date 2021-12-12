@@ -21,3 +21,7 @@ def derivate_SPU(x):
         return np.array([derivate_sigmoid(-x_i) if x_i <= 0 else 2 * x_i for x_i in x])
     else:
         return derivate_sigmoid(-x) if x <= 0 else 2 * x
+
+
+def pprint(x):
+    return print(f"\t{x}")

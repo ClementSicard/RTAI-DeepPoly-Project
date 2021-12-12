@@ -16,6 +16,8 @@ class Normalization(nn.Module):
 class SPU(nn.Module):
 
     def forward(self, x):
+        if not isinstance(x, torch.Tensor):
+            x = torch.tensor(x)
         return torch.where(x > 0, x**2 - 0.5, torch.sigmoid(-x) - 1)
 
 
