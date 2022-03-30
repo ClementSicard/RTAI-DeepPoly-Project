@@ -1,13 +1,28 @@
 #!/bin/bash
+TOTAL=0
+CORRECT=0
 
 for net in fc1 fc2 fc3 fc4 fc5
 do
 	for k in 0 1;
 	do
-		echo Evaluating network net${k}_${net}
+		echo ""
+		echo "Evaluating network net${k}_${net}"
 		for spec in `ls ../test_cases/net${k}_${net}`
 		do
-			python verifier.py --net net${k}_${net} --spec ../test_cases/net${k}_${net}/${spec}
+			TOTAL=$((TOTAL+1))
+			GT=$(awk -v net="net${k}_${net}" -v spec="$spec" -F ',' '$1 == net && $2 == spec {print $3}' "../test_cases/gt.txt")
+			START=$(date +%s);
+			RESULT=$(python verifier.py --net net${k}_${net} --spec ../test_cases/net${k}_${net}/${spec});
+
+			echo "Ground truth: $GT, Result: $RESULT";
+			if [ "$GT" = "$RESULT" ]; then
+				CORRECT=$((CORRECT+1))
+			elif [ "$RESULT" = "verified" ] && [ "$GT" = "not verified" ]; then
+				CORRECT=$((CORRECT-2))
+			fi
 		done
 	done
 done
+echo ""
+echo "--> Correctly classified: $CORRECT/$TOTAL"

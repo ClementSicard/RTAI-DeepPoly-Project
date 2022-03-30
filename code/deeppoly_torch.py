@@ -41,9 +41,12 @@ class DeepPolyLinearTransformer(torch.nn.Module):
         new_upper_bounds = torch.matmul(lower_bounds, negative_weights.t(
         )) + torch.matmul(upper_bounds, positive_weights.t()) + bias
 
-        # quick check here
+        # pprint(f"Lower: {new_lower_bounds}")
+        # pprint(f"Upper: {new_upper_bounds}")
+
+        # Quick check here
         assert (new_lower_bounds <= new_upper_bounds).all(
-        ), "Error with the box bounds: low>high"
+        ), "Error with the box bounds: lower > upper"
 
         return new_lower_bounds, new_upper_bounds
 
@@ -284,7 +287,7 @@ class DeepPolyVerifierTorch(torch.nn.Module):
         input_size: int,
         order: int = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """ 
+        """
         Implements backsubstitution down to the layer at `layer_index`
         """
         if order == None:
@@ -357,7 +360,8 @@ class DeepPolyVerifierTorch(torch.nn.Module):
         lower_bounds, _ = DeepPolyLinearTransformer.transform_domain(
             lower_weights, lower_bias, l, u)
         _, upper_bounds = DeepPolyLinearTransformer.transform_domain(
-            upper_weights, upper_bias, l, u)
+            upper_weights, upper_bias, l, u
+        )
 
         return lower_bounds, upper_bounds
 
@@ -388,8 +392,7 @@ class DeepPolyVerifierTorch(torch.nn.Module):
             current_column = back_sub_matrix[:, i]
 
             lower = torch.ones_like(current_column) * lower_weights_spu[i, i]
-            upper = torch.ones_like(
-                current_column) * upper_weights_spu[i, i]
+            upper = torch.ones_like(current_column) * upper_weights_spu[i, i]
 
             negative_mask = (current_column < 0).int()
             positive_mask = (current_column >= 0).int()
@@ -400,8 +403,8 @@ class DeepPolyVerifierTorch(torch.nn.Module):
                 bias += current_column * negative_mask * upper_bias[i]
 
             else:
-                tmp = torch.mul(
-                    negative_mask, lower) + torch.mul(positive_mask, upper)
+                tmp = torch.mul(negative_mask, lower) + \
+                    torch.mul(positive_mask, upper)
                 bias += current_column * positive_mask * upper_bias[i]
 
             weights_matrix[:, i] = current_column * tmp
@@ -446,45 +449,60 @@ class DeepPolyVerifierTorch(torch.nn.Module):
 
         # order = layers -1 --> order -1 = layers -2 --> skipping first two layers
         for layer in self.layers[1 - order:][::-1]:
-            if isinstance(layer, DeepPolySPUTransformer):
-                lower_weights_tmp = layer.lower_weights
-                upper_weights_tmp = layer.upper_weights
+            upper_weights_tmp = layer.upper_weights if isinstance(
+                layer, DeepPolySPUTransformer) else layer.layer.weight
+            upper_bias_tmp = layer.upper_bias if isinstance(
+                layer, DeepPolySPUTransformer) else layer.layer.bias
+            lower_weights_tmp = layer.lower_weights if isinstance(
+                layer, DeepPolySPUTransformer) else layer.layer.weight
+            lower_bias_tmp = layer.lower_bias if isinstance(
+                layer, DeepPolySPUTransformer) else layer.layer.bias
 
-                upper_bias_tmp = layer.upper_bias
+            upper_bias += torch.matmul(upper_weights, upper_bias_tmp)
+            lower_bias += torch.matmul(lower_weights, lower_bias_tmp)
 
-                lower_weights, lower_bias_delta = self._backsubstitute_spu(
-                    back_sub_matrix=lower_weights,
-                    lower_weights_spu=lower_weights_tmp,
-                    upper_weights_spu=upper_weights_tmp,
-                    upper_bias=upper_bias_tmp,
-                )
+            upper_weights = torch.matmul(upper_weights, upper_weights_tmp)
+            lower_weights = torch.matmul(lower_weights, lower_weights_tmp)
 
-                upper_weights, upper_bias_delta = self._backsubstitute_spu(
-                    back_sub_matrix=upper_weights,
-                    lower_weights_spu=lower_weights_tmp,
-                    upper_weights_spu=upper_weights_tmp,
-                    upper_bias=upper_bias_tmp,
-                    lower_bool=False
-                )
+            # if isinstance(layer, DeepPolySPUTransformer):
+            #     lower_weights_tmp = layer.lower_weights
+            #     upper_weights_tmp = layer.upper_weights
 
-                upper_bias += upper_bias_delta
-                lower_bias += lower_bias_delta
+            #     upper_bias_tmp = layer.upper_bias
 
-            elif isinstance(layer, DeepPolyLinearTransformer):
-                upper_weights_tmp = layer.layer.weight
-                upper_bias_tmp = layer.layer.bias
+            #     lower_weights, lower_bias_delta = self._backsubstitute_spu(
+            #         back_sub_matrix=lower_weights,
+            #         lower_weights_spu=lower_weights_tmp,
+            #         upper_weights_spu=upper_weights_tmp,
+            #         upper_bias=upper_bias_tmp,
+            #     )
 
-                lower_weights_tmp = layer.layer.weight
-                lower_bias_tmp = layer.layer.bias
+            #     upper_weights, upper_bias_delta = self._backsubstitute_spu(
+            #         back_sub_matrix=upper_weights,
+            #         lower_weights_spu=lower_weights_tmp,
+            #         upper_weights_spu=upper_weights_tmp,
+            #         upper_bias=upper_bias_tmp,
+            #         lower_bool=False
+            #     )
 
-                upper_bias += torch.matmul(upper_weights, upper_bias_tmp)
-                lower_bias += torch.matmul(lower_weights, lower_bias_tmp)
+            #     upper_bias += upper_bias_delta
+            #     lower_bias += lower_bias_delta
 
-                upper_weights = torch.matmul(upper_weights, upper_weights_tmp)
-                lower_weights = torch.matmul(lower_weights, lower_weights_tmp)
+            # elif isinstance(layer, DeepPolyLinearTransformer):
+            #     upper_weights_tmp = layer.layer.weight
+            #     upper_bias_tmp = layer.layer.bias
 
-            else:
-                raise Exception("Unknown layer in the forward pass ")
+            #     lower_weights_tmp = layer.layer.weight
+            #     lower_bias_tmp = layer.layer.bias
+
+            #     upper_bias += torch.matmul(upper_weights, upper_bias_tmp)
+            #     lower_bias += torch.matmul(lower_weights, lower_bias_tmp)
+
+            #     upper_weights = torch.matmul(upper_weights, upper_weights_tmp)
+            #     lower_weights = torch.matmul(lower_weights, lower_weights_tmp)
+
+            # else:
+            #     raise Exception("Unknown layer in the forward pass ")
 
         # finally computing the forward pass on the input ranges
         # note: no bias here (all the biases were already included in W)

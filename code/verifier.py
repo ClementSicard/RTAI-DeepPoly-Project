@@ -16,10 +16,10 @@ def analyze(net: DeepPolyVerifierTorch, inputs: torch.Tensor, eps: float, true_l
     """
     1. Transform initial input
     """
-    initial_lower_bounds = torch.max(
-        inputs - eps, torch.tensor(0.0)).to(DEVICE)
-    initial_upper_bounds = torch.min(
-        inputs + eps, torch.tensor(1.0)).to(DEVICE)
+    initial_lower_bounds = torch.clamp(
+        inputs - eps, min=0.0).to(DEVICE)
+    initial_upper_bounds = torch.clamp(
+        inputs + eps, max=1.0).to(DEVICE)
 
     """
     2. Propagate the domain through the network
@@ -70,6 +70,7 @@ def main():
                         help='Neural network architecture which is supposed to be verified.')
     parser.add_argument('--spec', type=str, required=True,
                         help='Test case to verify.')
+
     args = parser.parse_args()
 
     with open(args.spec, 'r') as f:
@@ -82,23 +83,28 @@ def main():
         net = FullyConnected(DEVICE, INPUT_SIZE, [50, 10]).to(DEVICE)
         deeppoly_verifier = DeepPolyVerifierTorch(
             DEVICE, INPUT_SIZE, [50, 10], verbose=VERBOSE).to(DEVICE)
+
     elif args.net.endswith('fc2'):
         net = FullyConnected(DEVICE, INPUT_SIZE, [100, 50, 10]).to(DEVICE)
         deeppoly_verifier = DeepPolyVerifierTorch(
             DEVICE, INPUT_SIZE, [100, 50, 10], verbose=VERBOSE).to(DEVICE)
+
     elif args.net.endswith('fc3'):
         net = FullyConnected(DEVICE, INPUT_SIZE, [100, 100, 10]).to(DEVICE)
         deeppoly_verifier = DeepPolyVerifierTorch(
             DEVICE, INPUT_SIZE, [100, 100, 10], verbose=VERBOSE).to(DEVICE)
+
     elif args.net.endswith('fc4'):
         net = FullyConnected(DEVICE, INPUT_SIZE, [100, 100, 50, 10]).to(DEVICE)
         deeppoly_verifier = DeepPolyVerifierTorch(
             DEVICE, INPUT_SIZE, [100, 100, 50, 10], verbose=VERBOSE).to(DEVICE)
+
     elif args.net.endswith('fc5'):
         net = FullyConnected(DEVICE, INPUT_SIZE, [
             100, 100, 100, 100, 10]).to(DEVICE)
         deeppoly_verifier = DeepPolyVerifierTorch(DEVICE, INPUT_SIZE, [
             100, 100, 100, 100, 10], verbose=VERBOSE).to(DEVICE)
+
     else:
         assert False
 
@@ -114,6 +120,9 @@ def main():
 
     deeppoly_verifier.load_weights(net=net)
 
+    if VERBOSE:
+        print(net)
+
     if analyze(deeppoly_verifier, inputs, eps, true_label):
         print('verified')
     else:
@@ -121,4 +130,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except AssertionError:
+        print("not verified")
